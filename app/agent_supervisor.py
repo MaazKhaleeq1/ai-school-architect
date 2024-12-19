@@ -3,6 +3,7 @@
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 import functools
 import operator
+import subprocess
 
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.tools.retriever import create_retriever_tool
@@ -16,6 +17,71 @@ from langchain_core.tools import tool
 from langchain_experimental.tools import PythonREPLTool
 from langgraph.graph import StateGraph, END
 
+REPO_URL = "https://github.com/trilogy-group/Lithium-FAF-Copilot.git"
+
+@tool
+def clone_repo(repo_url: str = REPO_URL, directory: str = None) -> str:
+    """
+    Clone a Git repository from the provided repo_url.
+    If directory is provided, it clones into that directory name.
+    Otherwise, Git will infer the directory name from the repo.
+    
+    Prerequisites:
+    - 'git' must be installed and available in the system PATH.
+    - User running this command must have the correct permissions 
+      (for private repos, SSH keys or credentials must be set up).
+    """
+    cmd = ["git", "clone", repo_url]
+    if directory:
+        cmd.append(directory)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return f"Repository successfully cloned.\nOutput:\n{result.stdout}"
+    except subprocess.CalledProcessError as e:
+        return f"Error cloning repository:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
+
+@tool
+def commit_and_create_pr(
+    branch_name: str,
+    commit_message: str,
+    pr_title: str,
+    pr_body: str = "Auto-generated PR via langchain-based code agent."
+) -> str:
+    """
+    Creates a new branch, commits the current working directory code changes,
+    and opens a pull request. Uses local git + GitHub CLI.
+    
+    Prerequisites:
+    - 'git' is installed and working locally.
+    - 'gh' (GitHub CLI) is installed and authenticated.
+    - You have write permissions to the repo (and an origin remote).
+    """
+    try:
+        # Create a new branch
+        subprocess.run(["git", "checkout", "-b", branch_name], check=True)
+        
+        # Stage and commit changes
+        subprocess.run(["git", "add", "."], check=True)
+        subprocess.run(["git", "commit", "-m", commit_message], check=True)
+        
+        # Push the branch
+        subprocess.run(["git", "push", "-u", "origin", branch_name], check=True)
+        
+        # Create a pull request
+        pr_cmd = [
+            "gh", "pr", "create",
+            "--title", pr_title,
+            "--body", pr_body,
+            "--base", "main",  # or 'master', depending on your repo
+            "--head", branch_name
+        ]
+        pr_output = subprocess.run(pr_cmd, check=True, capture_output=True, text=True)
+        
+        return f"Pull request created successfully:\n{pr_output.stdout}"
+    except subprocess.CalledProcessError as e:
+        return f"Error in commit_and_create_pr: {e}\n{e.output}"
+
 # Step 2: Define tools
 # Here, define any tools the agents might use. Example given:
 tavily_tool = TavilySearchResults(max_results=5)
@@ -25,13 +91,17 @@ python_repl_tool = PythonREPLTool()
 
 # Step 3: Define the system prompt for the supervisor agent
 # Customize the members list as needed.
-members = ["Researcher", "Coder", "Reviewer", "QA Tester"]
+members = ["Coder", "Researcher", "Reviewer", "QA Tester", "Git Agent"]
 system_prompt = (
-    f"You are a supervisor tasked with managing a conversation between the"
+    f"This is part of a feature agent system for a software development team."
+    f" You are a supervisor tasked with managing a conversation between the"
     f" following workers:  {members}. Given the following user request,"
-    f" respond with the worker to act next. Each worker will perform a"
-    f" task and respond with their results and status. When finished,"
-    f" respond with FINISH."
+    f" respond with the worker to act next. Start with cloning the repository." 
+    f" Generate the code for the requested feature or bug fix, test the code,"
+    f" review the code, and create a pull request. The Git Agent will handle"
+    f" the cloning and pull request creation. The QA Tester will test the code."
+    f" Each worker will perform a task and respond with their results and status."
+    f" When finished, respond with FINISH."
 )
 
 # Step 4: Define options for the supervisor to choose from
@@ -149,10 +219,24 @@ test_node = functools.partial(agent_node, agent=test_agent, name="QA Tester")
 
 code_agent = create_agent(
     llm,
-    [python_repl_tool, retriever_tool],  # ALSO DANGER DANGER
-    "You may generate safe code to implement the requested feature or fix the bug using the application code provided",
+    [python_repl_tool, retriever_tool, commit_and_create_pr, clone_repo],
+    """You may generate safe code to implement the requested feature or fix the bug.
+    You leverage the existing codebase and Python REPL to write and test code.
+    You generate unit tests that covers the new code completely.
+    You follow the existing code style and conventions.
+    """,
 )
 code_node = functools.partial(agent_node, agent=code_agent, name="Coder")
+
+git_agent = create_agent(
+    llm,
+    [python_repl_tool, clone_repo, commit_and_create_pr],
+    """You are a Git agent. You can clone a repository and create a pull request.
+    You should clone the repository at the start of the process in a temporary directory.
+    You should create a pull request at the end of the process and cleanup the temporary directory.
+    """,
+)
+git_node = functools.partial(agent_node, agent=git_agent, name="Git Agent")
 
 # Step 13: Define the workflow using StateGraph
 # Add nodes and their corresponding functions to the workflow.
@@ -161,6 +245,7 @@ workflow.add_node("Reviewer", review_node)
 workflow.add_node("Researcher", research_node)
 workflow.add_node("Coder", code_node)
 workflow.add_node("QA Tester", test_node)
+workflow.add_node("Git Agent", git_node)
 workflow.add_node("supervisor", supervisor_chain)
 
 # Step 14: Add edges to the workflow
