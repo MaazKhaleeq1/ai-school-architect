@@ -21,3 +21,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
+from prometheus_fastapi_instrumentator import Instrumentator
+
+# Instrumentation for monitoring
+Instrumentator().instrument(app).expose(app)
