@@ -3,6 +3,8 @@
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 import functools
 import operator
+import subprocess
+import os
 
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.tools.retriever import create_retriever_tool
@@ -16,6 +18,71 @@ from langchain_core.tools import tool
 from langchain_experimental.tools import PythonREPLTool
 from langgraph.graph import StateGraph, END
 
+@tool
+def navigate_repo() -> str:
+    "Navigate to the cloned Git repository from the provided repo_dir."
+
+    try:
+        # Navigate to the cloned directory
+        result = subprocess.run(["cd", "/Users/maazkhaleeq/development/repos/Lithium/Lithium-FAF-Copilot"], capture_output=True, text=True, check=True)
+        print("Result:", result)
+        
+        # List all files recursively
+        all_files = subprocess.run(["ls", "-R"], capture_output=True, text=True, check=True)
+    
+        # Log the files
+        print(f"Repo files:\n{all_files.stdout}")
+        print("CWD:", os.getcwd())
+    
+        return (f"Repository successfully navigated!\n"
+                    f"Files:\n{all_files.stdout}")
+            
+    except subprocess.CalledProcessError as e:
+        return f"Error navigating repository:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
+    except Exception as e:
+        return f"Unexpected error: {str(e)}"
+
+@tool
+def commit_and_create_pr(
+    branch_name: str,
+    commit_message: str,
+    pr_title: str,
+    pr_body: str = "Auto-generated PR via langchain-based code agent."
+) -> str:
+    """
+    Creates a new branch, commits the current working directory code changes,
+    and opens a pull request. Uses local git + GitHub CLI.
+    
+    Prerequisites:
+    - 'git' is installed and working locally.
+    - 'gh' (GitHub CLI) is installed and authenticated.
+    - You have write permissions to the repo (and an origin remote).
+    """
+    try:
+        # Create a new branch
+        subprocess.run(["git", "checkout", "-b", branch_name], check=True)
+        
+        # Stage and commit changes
+        subprocess.run(["git", "add", "."], check=True)
+        subprocess.run(["git", "commit", "-m", commit_message], check=True)
+        
+        # Push the branch
+        subprocess.run(["git", "push", "-u", "origin", branch_name], check=True)
+        
+        # Create a pull request
+        pr_cmd = [
+            "gh", "pr", "create",
+            "--title", pr_title,
+            "--body", pr_body,
+            "--base", "main",  # or 'master', depending on your repo
+            "--head", branch_name
+        ]
+        pr_output = subprocess.run(pr_cmd, check=True, capture_output=True, text=True)
+        
+        return f"Pull request created successfully:\n{pr_output.stdout}"
+    except subprocess.CalledProcessError as e:
+        return f"Error in commit_and_create_pr: {e}\n{e.output}"
+
 # Step 2: Define tools
 # Here, define any tools the agents might use. Example given:
 tavily_tool = TavilySearchResults(max_results=5)
@@ -25,13 +92,18 @@ python_repl_tool = PythonREPLTool()
 
 # Step 3: Define the system prompt for the supervisor agent
 # Customize the members list as needed.
-members = ["Researcher", "Coder", "Reviewer", "QA Tester"]
+members = ["Coder", "Researcher", "Reviewer", "QA Tester"]
 system_prompt = (
-    f"You are a supervisor tasked with managing a conversation between the"
-    f" following workers:  {members}. Given the following user request,"
-    f" respond with the worker to act next. Each worker will perform a"
-    f" task and respond with their results and status. When finished,"
-    f" respond with FINISH."
+    f"This is part of a feature agent system for a software development team."
+    f" You are a supervisor tasked with managing a conversation between the"
+    f" following workers:  {members}. You would clearly state the input and"
+    f" expected output from all workers to ensure efficient execution. Given "
+    f" the following user request, respond with the worker to act next."
+    f" Start with navigating to the target repository, generate the code"
+    f" for the requested feature or bug fix, test the code, review the code"
+    f" and create a pull request with Coder Agent. The QA Tester will test"
+    f" the code. Each worker will perform a task and respond with their results"
+    f" and status. When finished, respond with FINISH."
 )
 
 # Step 4: Define options for the supervisor to choose from
@@ -149,8 +221,14 @@ test_node = functools.partial(agent_node, agent=test_agent, name="QA Tester")
 
 code_agent = create_agent(
     llm,
-    [python_repl_tool, retriever_tool],  # ALSO DANGER DANGER
-    "You may generate safe code to implement the requested feature or fix the bug using the application code provided",
+    [python_repl_tool, navigate_repo, commit_and_create_pr],
+    """You may generate safe code to implement the requested feature or fix the bug.
+    You start with navigating to the target repository. You leverage the existing 
+    codebase and Python REPL to find files, write and test code. You generate unit 
+    tests that covers the new code completely. You create a new branch, commit 
+    the code and create a  pull request in the target repository only. You follow 
+    the existing code style and conventions.
+    """,
 )
 code_node = functools.partial(agent_node, agent=code_agent, name="Coder")
 
