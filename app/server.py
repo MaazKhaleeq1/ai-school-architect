@@ -21,3 +21,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/canary")
+async def canary_check():
+    return {"status": "alive", "message": "Canary check successful"}
